@@ -180,9 +180,13 @@ jobs:
         -> https://github.com/sidex15/ksu_module_susfs
         
     steps:
-      # Checkout the code
+      # Checkout the code with optimizations to avoid argument list issues
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Shallow clone to reduce checkout time and avoid long argument lists
+          clean: true     # Clean working directory
+          submodules: false  # Don't fetch submodules to reduce complexity
 
       - name: 确定分支为 KernelSU-${{ inputs.kernelsu_variant }}
         if: ${{ inputs.kernelsu_branch == 'Dev(开发)' || inputs.kernelsu_variant == 'MKSU' || inputs.kernelsu_variant == 'SukiSU'  }}
@@ -381,11 +385,30 @@ jobs:
               echo "Release already exists, will update existing release"
             fi
 
-      # 下载 A12 的附件（仅当 A12 生成成功或输入为 true 或为空时）
-      - name: Download Artifacts
+      # 分批下载附件以避免参数列表过长
+      - name: Download Manager Artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: "*Manager*"
           path: ./downloaded-artifacts
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Download SUSFS Artifacts  
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "susfs-*"
+          path: ./downloaded-artifacts
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Download Kernel Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*_kernel-*"
+          path: ./downloaded-artifacts
+          merge-multiple: true
+        continue-on-error: true
           
 
       # 创建或更新 GitHub 发布
@@ -416,64 +439,83 @@ jobs:
             done
           fi
 
-      - name: 上传KSU管理器 & SUS模块
+      - name: 上传KSU管理器文件
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-            echo "Uploading KSU管理器 and SUS模块 to release: $NEW_TAG"
+            echo "Uploading KSU Manager files to release: $NEW_TAG"
             
-            # Upload Manager files
-            if [ -d "./downloaded-artifacts" ]; then
-              for manager_dir in ./downloaded-artifacts/*Manager*; do
-                if [ -d "$manager_dir" ]; then
-                  for file in "$manager_dir"/*; do
-                    if [ -f "$file" ]; then
-                      echo "Uploading manager file: $file"
-                      gh release upload "$NEW_TAG" "$file" --clobber
-                    fi
-                  done
-                fi
-              done
-              
-              # Upload SUSFS files  
-              for susfs_dir in ./downloaded-artifacts/susfs-*; do
-                if [ -d "$susfs_dir" ]; then
-                  for file in "$susfs_dir"/*; do
-                    if [ -f "$file" ]; then
-                      echo "Uploading susfs file: $file"
-                      gh release upload "$NEW_TAG" "$file" --clobber
-                    fi
-                  done
-                fi
-              done
-            else
-              echo "No downloaded-artifacts directory found"
-            fi
+            # Upload Manager files one by one to avoid argument list issues
+            find ./downloaded-artifacts -name "*Manager*" -type f 2>/dev/null | while read -r file; do
+              if [ -f "$file" ]; then
+                echo "Uploading manager file: $(basename "$file")"
+                gh release upload "$NEW_TAG" "$file" --clobber || echo "Failed to upload $(basename "$file")"
+              fi
+            done
 
-      - name: 动态上传发布资产
+      - name: 上传SUS模块文件
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+            echo "Uploading SUS module files to release: $NEW_TAG"
+            
+            # Upload SUSFS files one by one to avoid argument list issues  
+            find ./downloaded-artifacts -name "susfs-*" -type f 2>/dev/null | while read -r file; do
+              if [ -f "$file" ]; then
+                echo "Uploading susfs file: $(basename "$file")"
+                gh release upload "$NEW_TAG" "$file" --clobber || echo "Failed to upload $(basename "$file")"
+              fi
+            done
+
+      - name: 上传内核文件
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Uploading kernel files to release: $NEW_TAG"
           
-          if [ -d "./downloaded-artifacts" ]; then
-            for file in ./downloaded-artifacts/*_kernel-*/*; do
-                # Skip directories
-                if [ -d "$file" ]; then
-                    continue
-                fi
-
-                # Upload the file to the GitHub release
-                echo "Uploading kernel file: $file"
-                gh release upload "$NEW_TAG" "$file" --clobber
-            done
-          else
-            echo "No downloaded-artifacts directory found"
-          fi
+          # Use find to avoid argument list length issues
+          find ./downloaded-artifacts -name "*_kernel-*" -type f 2>/dev/null | while read -r file; do
+            if [ -f "$file" ]; then
+              echo "Uploading kernel file: $(basename "$file")"
+              gh release upload "$NEW_TAG" "$file" --clobber || echo "Failed to upload $(basename "$file")"
+            fi
+          done
+          
+          # Also upload any other files that might be artifacts
+          find ./downloaded-artifacts -maxdepth 2 -type f \
+            ! -name "*Manager*" \
+            ! -name "susfs-*" \
+            ! -path "*/.*" \
+            2>/dev/null | while read -r file; do
+            if [ -f "$file" ]; then
+              echo "Uploading additional file: $(basename "$file")"  
+              gh release upload "$NEW_TAG" "$file" --clobber || echo "Failed to upload $(basename "$file")"
+            fi
+          done
 
       # Display Files Uploaded
       - name: Display Files Uploaded
         run: |
-          echo "GitHub release created with the following files:"
-          ls ./downloaded-artifacts/**/*
+          echo "GitHub release created/updated: $NEW_TAG"
+          echo "Uploaded files summary:"
+          
+          # Count and display files safely
+          if [ -d "./downloaded-artifacts" ]; then
+            TOTAL_FILES=$(find ./downloaded-artifacts -type f 2>/dev/null | wc -l)
+            echo "Total files found: $TOTAL_FILES"
+            
+            echo "Files by type:"
+            find ./downloaded-artifacts -name "*Manager*" -type f 2>/dev/null | wc -l | xargs echo "Manager files:"
+            find ./downloaded-artifacts -name "susfs-*" -type f 2>/dev/null | wc -l | xargs echo "SUSFS files:"  
+            find ./downloaded-artifacts -name "*_kernel-*" -type f 2>/dev/null | wc -l | xargs echo "Kernel files:"
+            
+            echo ""
+            echo "Recent files (first 10):"
+            find ./downloaded-artifacts -type f 2>/dev/null | head -10 | while read -r file; do
+              echo "  - $(basename "$file")"
+            done
+          else
+            echo "No downloaded-artifacts directory found"
+          fi
