@@ -33,7 +33,7 @@ on:
           - Other(其他/指定)
         default: Dev(开发)
       # kernelsu_branch_other:
-      #   description: "如果选择了 “其他”，请指定您的自定义分支"
+      #   description: "如果选择了 "其他"，请指定您的自定义分支"
       #   required: false
       #   type: string  # This input is required if 'Other' is chosen
       version:
@@ -362,16 +362,20 @@ jobs:
 
             NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
             
+            # 检查标签是否已存在
+            if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo "标签 $NEW_TAG 已存在，跳过创建"
+            else
+              echo "创建新标签: $NEW_TAG"
+              git tag $NEW_TAG
+              git push --tags
+            fi
             
             # Output the new tag to be used
             echo "New tag: $NEW_TAG"
             
             # Set the new tag as an environment variable to be used in later steps
             echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
-            
-            # Create the tag in the repository
-            git tag $NEW_TAG
-            git push --tags
 
       # 下载 A12 的附件（仅当 A12 生成成功或输入为 true 或为空时）
       - name: Download Artifacts
@@ -388,29 +392,42 @@ jobs:
           prerelease: true  # Mark the release as a pre-release
           release_name: ${{ env.RELEASE_NAME }} # Pass the RELEASE_NAME to the action
           body: ${{ env.RELEASE_NOTES }}  # Pass the RELEASE_NOTES to the action
-
-      - name: 上传KSU管理器 & SUS模块
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 如果发布已存在，则跳过（不报错）
         continue-on-error: true
+
+      - name: 检查发布状态并上传资源
+        if: ${{ success() }}  # 只有在前面的步骤成功时才运行
         run: |
+          # 检查发布是否存在
+          if gh release view ${{ env.NEW_TAG }} >/dev/null 2>&1; then
+            echo "发布存在，开始上传资源..."
+            
             echo "Uploading KSU管理器"
-            gh release upload ${{ env.NEW_TAG }} "./downloaded-artifacts/*Manager*/*"
-            gh release upload ${{ env.NEW_TAG }} "./downloaded-artifacts/susfs-*/*"
+            gh release upload ${{ env.NEW_TAG }} "./downloaded-artifacts/*Manager*/*" --clobber || echo "管理器上传失败，继续..."
+            gh release upload ${{ env.NEW_TAG }} "./downloaded-artifacts/susfs-*/*" --clobber || echo "SUS模块上传失败，继续..."
 
-      - name: 动态上传发布资产
-        run: |
-          for file in ./downloaded-artifacts/*_kernel-*/*; do
-              # Skip directories
-              if [ -d "$file" ]; then
-                  continue
-              fi
+            # 动态上传内核文件
+            for file in ./downloaded-artifacts/*_kernel-*/*; do
+                # Skip directories
+                if [ -d "$file" ]; then
+                    continue
+                fi
 
-              # Upload the file to the GitHub release
-              echo "Uploading $file..."
-              gh release upload ${{ env.NEW_TAG }} "$file"
-          done
+                # Upload the file to the GitHub release
+                echo "Uploading $file..."
+                gh release upload ${{ env.NEW_TAG }} "$file" --clobber || echo "上传 $file 失败，继续..."
+            done
+            
+            echo "资源上传完成"
+          else
+            echo "发布不存在，跳过资源上传"
+            exit 1
+          fi
 
       # Display Files Uploaded
       - name: Display Files Uploaded
         run: |
           echo "GitHub release created with the following files:"
-          ls ./downloaded-artifacts/**/*
+          ls -la ./downloaded-artifacts/**/*
