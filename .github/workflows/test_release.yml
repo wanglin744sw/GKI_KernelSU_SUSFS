@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       make_release:
-        description: 'Do you want to create a release?'
+        description: '您想要创建发布版本吗?'
         required: true
         type: boolean
         default: true
